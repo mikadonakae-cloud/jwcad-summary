@@ -277,7 +277,7 @@ def _clean_pdf_line(line: str) -> str:
     # 例: IV1 4sq → IV14sq, IV 5 .5 s q → IV5.5sq
     def collapse(m):
         return re.sub(r'\s+', '', m.group(0))
-    line = re.sub(r'(?:IV|CVT)\s*[\d\s.]+\s*s\s*q', collapse, line, flags=re.IGNORECASE)
+    line = re.sub(r'(?:IV|CVT|CVD|CV)\s*[\d\s.]+\s*s\s*q', collapse, line, flags=re.IGNORECASE)
     # 6.6kV: 6 . 6 kV → 6.6kV
     line = re.sub(r'6\s*\.\s*6\s*k\s*[Vv]', '6.6kV', line)
     # FEP/HIVE括弧: FEP ( 80 ) → FEP(80)
@@ -312,10 +312,14 @@ def extract_text_from_txt(filepath: str) -> list[str]:
 # ×の前が本数、()内が長さ
 
 CONDUIT_PATTERN = re.compile(
-    r"(露出|埋設)[立下上配管]*\s*"
+    r"(露出|埋設|隠蔽)[立下上配管蔽]*\s*"
     r"("
-      r"(?:HIVE|VE|FEP|PFD|PF|PV|PZ)\s*\(?\s*\d+\s*\)?"  # サイズ付きタイプ (VE→HIVE変換)
-      r"|G\s*\(?\s*\d+\s*\)?|C\s*\(?\s*\d+\s*\)?|E\s*\(?\s*\d+\s*\)?"  # 鋼管サイズ付き
+      # 長形式プレフィックス付き or タイプコードのみ (サイズ付き)
+      r"(?:(?:ねじなし電線管|厚鋼電線管|金属製可とう電線管)\s*)?"
+      r"(?:HIVE|VE|FEP|PFD|PF|PV|PZ|KMS|KMV)\s*\(?\s*\d+\s*\)?"
+      r"|(?:(?:ねじなし電線管|厚鋼電線管)\s*)?[GCE]\s*\(?\s*\d+\s*\)?"  # G/C/E 鋼管
+      r"|フレキ(?:\s*\(?\s*\d+\s*\)?)?"                    # フレキ → KMS
+      r"|金属製可とう電線管(?:\s*\(?\s*\d+\s*\)?)?"        # 金属製可とう電線管 → KMS
       r"|厚鋼|G管|薄鋼|C管|E管|防水プリカ"                # 名称のみ (サイズなし)
     r")"
     r"\s*\d+\s*[×x×]\s*\d+\s*\((\d+)m\)",
@@ -378,9 +382,17 @@ BOLLARD_PATTERN = re.compile(
 )
 
 def normalize_conduit(raw_type: str) -> str:
-    """配管種を正規化。VE は HIVE と同一扱い。"""
+    """配管種を正規化。VE→HIVE、長形式プレフィックス除去、フレキ→KMS など。"""
     s = re.sub(r"\s+", "", raw_type.strip())
-    # VE / HIVE → HIVE (VEはHIVEの別称)
+    # 長形式プレフィックスを除去してからマッチ
+    s = re.sub(r"^ねじなし電線管", "", s)
+    s = re.sub(r"^厚鋼電線管", "", s)
+    s = re.sub(r"^金属製可とう電線管", "", s)
+    # フレキ → KMS
+    m = re.match(r"フレキ\(?(\d*)\)?", s)
+    if m:
+        return f"KMS({m.group(1)})" if m.group(1) else "KMS"
+    # VE / HIVE → HIVE
     m = re.match(r"(?:VE|HIVE)\(?(\d+)\)?", s, re.IGNORECASE)
     if m:
         return f"HIVE({m.group(1)})"
@@ -404,7 +416,15 @@ def normalize_conduit(raw_type: str) -> str:
     m = re.match(r"PZ\(?(\d+)\)?", s, re.IGNORECASE)
     if m:
         return f"PZ({m.group(1)})"
-    # G管 / 厚鋼 / G(54)
+    # KMS (金属製可とう電線管・フレキ)
+    m = re.match(r"KMS\(?(\d*)\)?", s, re.IGNORECASE)
+    if m:
+        return f"KMS({m.group(1)})" if m.group(1) else "KMS"
+    # KMV
+    m = re.match(r"KMV\(?(\d+)\)?", s, re.IGNORECASE)
+    if m:
+        return f"KMV({m.group(1)})"
+    # G管 / 厚鋼 / 厚鋼電線管 / G(54)
     if re.match(r"厚鋼|G管", s):
         return "G管"
     m = re.match(r"G\(?(\d+)\)?", s, re.IGNORECASE)
@@ -416,13 +436,13 @@ def normalize_conduit(raw_type: str) -> str:
     m = re.match(r"C\(?(\d+)\)?", s, re.IGNORECASE)
     if m:
         return f"C({m.group(1)})"
-    # E管 / E(25)
+    # E管 / ねじなし電線管 / E(25)
     if re.match(r"E管", s):
         return "E管"
     m = re.match(r"E\(?(\d+)\)?", s, re.IGNORECASE)
     if m:
         return f"E({m.group(1)})"
-    # 防水プリカ (名称のみ)
+    # 防水プリカ
     if re.match(r"防水プリカ", s):
         return "防水プリカ"
     return s
@@ -644,11 +664,17 @@ def aggregate(
         key = (c.install_type, c.conduit_type, cables_key)
         conduit_map[key] += c.length
 
-    # リスト形式に変換（挿入順を保持）
+    # リスト形式に変換し、配管サイズの数字で降順ソート
     conduit_rows = [
         (inst, ctype, list(cables_key), length)
         for (inst, ctype, cables_key), length in conduit_map.items()
     ]
+
+    def _conduit_size(row):
+        m = re.search(r'\d+', row[1])
+        return int(m.group()) if m else 0
+
+    conduit_rows.sort(key=_conduit_size, reverse=True)
 
     return dict(cable_totals), conduit_rows
 
