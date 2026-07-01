@@ -530,7 +530,7 @@ def parse_lines(lines: list[str]) -> tuple[list[ConduitEntry], list[CableEntry],
             "0123456789-()"
         ))
 
-        if re.search(r"既設", line):
+        if re.search(r"既設|撤去", line):
             continue
 
         # ※双方に記載 → ケーブル署名で重複チェックし、重複なら直前ブロックを除去
