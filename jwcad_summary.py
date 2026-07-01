@@ -174,11 +174,32 @@ def extract_text_from_pdf(filepath: str) -> list[str]:
     COL_SPLIT = 55  # この距離以上なら別列に分割(pt)
     Y_ROW = 10   # 列境界検出用：この距離以内のY差なら同一行とみなす(pt)
 
+    def _is_black(color) -> bool:
+        """テキスト色が黒に近いか判定（黒文字はカウント対象外）"""
+        if color is None:
+            return False
+        if isinstance(color, (int, float)):
+            return float(color) < 0.1
+        if isinstance(color, (list, tuple)):
+            c = [float(x) for x in color]
+            if len(c) == 1:
+                return c[0] < 0.1
+            if len(c) == 3:   # RGB
+                return max(c) < 0.1
+            if len(c) == 4:   # CMYK
+                return c[3] > 0.9 and max(c[:3]) < 0.1
+        return False
+
     all_lines = []
 
     with pdfplumber.open(filepath) as pdf:
         for page in pdf.pages:
-            words = page.extract_words(
+            # 黒文字を除外してから単語抽出
+            filtered = page.filter(
+                lambda obj: obj["object_type"] != "char"
+                or not _is_black(obj.get("non_stroking_color"))
+            )
+            words = filtered.extract_words(
                 x_tolerance=3,
                 y_tolerance=Y_TOL,
                 keep_blank_chars=False,
