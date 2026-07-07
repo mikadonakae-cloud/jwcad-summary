@@ -516,8 +516,10 @@ LOCATION_PATTERN = re.compile(
 )
 
 # 分電盤・開閉器盤パターン（新設・引込のみ対象、既設は除外）
+# 「新設分電盤内配線(OPK18-35A)」のように「盤内配線」の形でも型式があれば盤として検出
 PANEL_RE = re.compile(
-    r'(?:新設|引込|増設)?\s*(?:分電盤|開閉器盤|引込開閉器盤)'
+    r'(?:新設|引込|増設)\s*(?:分電盤|開閉器盤|引込開閉器盤)'
+    r'|(?:引込開閉器盤)'
 )
 PANEL_MODEL_RE = re.compile(r'\(([A-Z0-9][A-Z0-9\-]+)\)')  # (OMS-121B) など
 
@@ -710,7 +712,9 @@ def parse_lines(lines: list[str]) -> tuple[list[ConduitEntry], list[CableEntry],
             continue
 
         # 分電盤・開閉器盤マッチ（既設は除外済み）
-        if PANEL_RE.search(line) and "盤内" not in line:
+        # 「盤内」が含まれる場合でも型式（英数字）があれば盤として検出する
+        _has_model = bool(PANEL_MODEL_RE.search(line))
+        if PANEL_RE.search(line) and ("盤内" not in line or _has_model):
             pm = PANEL_RE.search(line)
             name = pm.group(0).strip()
             mm = PANEL_MODEL_RE.search(line)
