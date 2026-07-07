@@ -45,60 +45,137 @@ class FreeCableEntry:
 
 def extract_text_from_jww(filepath: str) -> list[str]:
     """
-    JWWファイルのバイナリを解析してテキスト文字列を抽出する。
-    JWWフォーマット: テキスト要素はタイプ=3 (SXF仕様準拠の簡易解析)
+    JWW v7 バイナリパーサー。
+    テキスト要素は \\xff\\xfe\\xff + uint8長さ + UTF-16-LE 形式で格納。
+    フォント名＋テキスト本文のペアを抽出し、座標付きで返す。
+    座標は content_end+17 バイト目から 8バイト倍精度浮動小数点×2。
+    印刷範囲（二重枠）内のテキストのみ対象とするため極端な座標を除外。
     """
-    texts = []
+    _JWW_MARKER = bytes([0xff, 0xfe, 0xff])
+    _FONT_RE = re.compile(r'ＭＳ|Times New Roman|Arial|明朝|Gothic|Serif|Sans')
+
     try:
         with open(filepath, "rb") as f:
             data = f.read()
 
-        # JWWはShift-JISエンコード。テキスト要素の前後パターンを探す
-        # より堅牢なアプローチ: Shift-JISとして解釈できる文字列を総当たり抽出
+        # ── UTF-16 文字列を全抽出 ──
+        raw_strings: list[tuple[int, str]] = []  # (offset, text)
         i = 0
-        while i < len(data) - 2:
-            # Shift-JISの2バイト文字開始バイト範囲
-            b = data[i]
-            if (0x81 <= b <= 0x9F) or (0xE0 <= b <= 0xFC):
-                # 連続する文字列を収集
-                j = i
-                raw = bytearray()
-                while j < len(data):
-                    c = data[j]
-                    if (0x81 <= c <= 0x9F) or (0xE0 <= c <= 0xFC):
-                        if j + 1 < len(data):
-                            raw.append(c)
-                            raw.append(data[j+1])
-                            j += 2
-                        else:
-                            break
-                    elif 0x20 <= c <= 0x7E:  # ASCII印字可能
-                        raw.append(c)
-                        j += 1
-                    else:
-                        break
-                if len(raw) >= 4:
+        while i < len(data) - 4:
+            if data[i:i+3] == _JWW_MARKER:
+                length = data[i + 3]
+                text_start = i + 4
+                text_end = text_start + length * 2
+                if text_end <= len(data) and 1 <= length <= 255:
                     try:
-                        text = raw.decode("shift_jis", errors="ignore").strip()
-                        if text and len(text) >= 2:
-                            texts.append(text)
-                    except Exception:
+                        text = data[text_start:text_end].decode("utf-16-le", errors="strict")
+                        raw_strings.append((i, text))
+                        i = text_end
+                        continue
+                    except (UnicodeDecodeError, ValueError):
                         pass
-                i = j
+            i += 1
+
+        # ── フォント名＋テキスト本文のペアを抽出し、座標も取得 ──
+        # 構造: [font_BOM+len+text] [content_BOM+len+text] [17byte suffix] [x: f64] [y: f64]
+        records: list[tuple[float, float, int, str]] = []  # (x, y, offset, text)
+
+        j = 0
+        while j < len(raw_strings) - 1:
+            off1, font = raw_strings[j]
+            off2, content = raw_strings[j + 1]
+
+            if _FONT_RE.search(font) and not _FONT_RE.search(content):
+                content_len = data[off2 + 3]
+                content_end = off2 + 4 + content_len * 2
+                # 座標は content_end + 17 バイト目
+                coord_off = content_end + 17
+                x, y = 0.0, 0.0
+                if coord_off + 16 <= len(data):
+                    try:
+                        x = struct.unpack_from("<d", data, coord_off)[0]
+                        y = struct.unpack_from("<d", data, coord_off + 8)[0]
+                        if not (-1e6 < x < 1e6 and -1e6 < y < 1e6):
+                            x, y = 0.0, 0.0
+                    except struct.error:
+                        pass
+                records.append((x, y, off2, content))
+                j += 2
+            else:
+                j += 1
+
+        if not records:
+            return []
+
+        # ── 印刷範囲フィルタ（二重枠外のテキストを除外）──
+        # ケーブル・配管パターンに一致するテキストを「シード」として
+        # 印刷範囲の中心を推定し、そこから遠すぎるテキストを除外する。
+        # （シンボルライブラリ等、図面領域外のレイヤテキストを排除）
+        seed_xs = [r[0] for r in records
+                   if (CONDUIT_PATTERN.search(r[3]) or CABLE_PATTERN.search(r[3])
+                       or LOCATION_PATTERN.search(r[3]))
+                   and r[0] != 0.0]
+        seed_ys = [r[1] for r in records
+                   if (CONDUIT_PATTERN.search(r[3]) or CABLE_PATTERN.search(r[3])
+                       or LOCATION_PATTERN.search(r[3]))
+                   and r[1] != 0.0]
+        if seed_xs and seed_ys:
+            x_lo = min(seed_xs) - 200.0
+            x_hi = max(seed_xs) + 200.0
+            y_lo = min(seed_ys) - 200.0
+            y_hi = max(seed_ys) + 200.0
+            records = [
+                r for r in records
+                if (r[0] == 0.0 or x_lo <= r[0] <= x_hi)
+                and (r[1] == 0.0 or y_lo <= r[1] <= y_hi)
+            ]
+
+        # ── 配管→ケーブルの順序修正 ──
+        # ファイル上ではケーブルが配管より先に現れる場合があるため、
+        # ケーブルの直後に同一X近傍の配管が来るとき入れ替える
+        def _is_conduit(t: str) -> bool:
+            return bool(CONDUIT_PATTERN.search(t))
+
+        def _is_cable(t: str) -> bool:
+            return bool(CABLE_PATTERN.search(t))
+
+        # offset順に並べてから処理
+        records.sort(key=lambda r: r[2])
+        recs = list(records)
+        i = 0
+        while i < len(recs) - 1:
+            rx, ry, roff, rt = recs[i]
+            if _is_cable(rt) and not _is_conduit(rt):
+                # 直後 1~5 要素に近傍配管がないか確認
+                for k in range(i + 1, min(i + 6, len(recs))):
+                    kx, ky, koff, kt = recs[k]
+                    if _is_conduit(kt) and abs(kx - rx) < 30:
+                        # このケーブルを配管の直後に移動
+                        cable_rec = recs.pop(i)
+                        recs.insert(k, cable_rec)
+                        i = k + 1
+                        break
+                else:
+                    i += 1
             else:
                 i += 1
 
-        # 重複除去・短すぎる文字列除外
-        seen = set()
-        result = []
-        for t in texts:
-            if t not in seen and len(t) >= 3:
-                seen.add(t)
-                result.append(t)
-        return result
+        seen: set[tuple] = set()
+        lines: list[str] = []
+        for rx, ry, _, text in recs:
+            text = text.replace("　", " ").replace(" ", " ").strip()
+            if len(text) < 2:
+                continue
+            dedup_key = (text, round(rx, -1), round(ry, -1))
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            lines.append(text)
+
+        return lines
 
     except Exception as e:
-        print(f"JWW読込エラー: {e}")
+        print(f"JWW読込エラー: {e}", file=sys.stderr)
         return []
 
 
