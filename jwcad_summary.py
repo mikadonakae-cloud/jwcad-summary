@@ -38,6 +38,12 @@ class FreeCableEntry:
     cable_type: str
     length: int
 
+@dataclass
+class PanelEntry:
+    """分電盤・開閉器盤などの付帯設備"""
+    name: str                  # 新設分電盤 / 引込開閉器盤 など
+    model: Optional[str] = None  # OMS-121B など（型式がある場合）
+
 
 # ─────────────────────────────────────────
 #  JWWバイナリからテキスト抽出
@@ -509,6 +515,12 @@ LOCATION_PATTERN = re.compile(
     r"[配線立下]*"                         # 「配線」「立下」などの後置詞
 )
 
+# 分電盤・開閉器盤パターン（新設・引込のみ対象、既設は除外）
+PANEL_RE = re.compile(
+    r'(?:新設|引込|増設)?\s*(?:分電盤|開閉器盤|引込開閉器盤)'
+)
+PANEL_MODEL_RE = re.compile(r'\(([A-Z0-9][A-Z0-9\-]+)\)')  # (OMS-121B) など
+
 # バリカーパターン例:
 #   バリカー ×3
 #   バリカー 3台
@@ -639,7 +651,7 @@ def parse_location(line: str) -> Optional[str]:
     return label if label else None
 
 
-def parse_lines(lines: list[str]) -> tuple[list[ConduitEntry], list[CableEntry], list[FreeCableEntry], list[tuple[str, int]]]:
+def parse_lines(lines: list[str]) -> tuple[list[ConduitEntry], list[CableEntry], list[FreeCableEntry], list[tuple[str, int]], list[PanelEntry]]:
     """
     テキスト行リストから配管・ケーブル・配管なしケーブル・バリカーを抽出する。
     ※「双方に記載」マーカーが付いたブロックはケーブル種+長さの組み合わせで重複排除する。
@@ -648,6 +660,8 @@ def parse_lines(lines: list[str]) -> tuple[list[ConduitEntry], list[CableEntry],
     cables: list[CableEntry] = []
     free_cables: list[FreeCableEntry] = []
     bollards: list[tuple[str, int]] = []
+    panels: list[PanelEntry] = []
+    _seen_panels: set[str] = set()  # 重複排除用
 
     block_conduit: Optional[ConduitEntry] = None
     block_location: Optional[str] = None
@@ -693,6 +707,18 @@ def parse_lines(lines: list[str]) -> tuple[list[ConduitEntry], list[CableEntry],
                 if sig:
                     dual_cable_sigs.add(sig)
             reset_block()
+            continue
+
+        # 分電盤・開閉器盤マッチ（既設は除外済み）
+        if PANEL_RE.search(line) and "盤内" not in line:
+            pm = PANEL_RE.search(line)
+            name = pm.group(0).strip()
+            mm = PANEL_MODEL_RE.search(line)
+            model = mm.group(1) if mm else None
+            key = f"{name}|{model or ''}"
+            if key not in _seen_panels:
+                _seen_panels.add(key)
+                panels.append(PanelEntry(name=name, model=model))
             continue
 
         # バリカーマッチ
@@ -765,7 +791,7 @@ def parse_lines(lines: list[str]) -> tuple[list[ConduitEntry], list[CableEntry],
             if line and not re.match(r"[・※▼▶　\s#]", line):
                 reset_block()
 
-    return conduits, cables, free_cables, bollards
+    return conduits, cables, free_cables, bollards, panels
 
 
 # ─────────────────────────────────────────

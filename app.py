@@ -3,6 +3,7 @@ JwCAD 配線・配管集計アプリ (Streamlit)
 """
 
 import io
+import json
 import tempfile
 import os
 from pathlib import Path
@@ -17,13 +18,75 @@ from jwcad_summary import (
     aggregate,
     aggregate_free_cables,
     aggregate_bollards,
+    PanelEntry,
 )
+
+# ─────────────────────────────────────────
+#  盤寸法キャッシュ
+# ─────────────────────────────────────────
+
+_CACHE_PATH = Path(__file__).parent / "panel_dimensions_cache.json"
+
+# 既知モデルの初期データ
+_BUILTIN_CACHE: dict[str, str] = {
+    "OMS-121B": "400×1200×200",   # 日東工業 引込計器盤キャビネット W×H×D mm
+    "OMS-21B":  "500×800×200",    # 日東工業 引込計器盤キャビネット
+    "OMS-11B":  "400×800×200",    # 日東工業 引込計器盤キャビネット
+    "OMS-12B":  "400×1000×200",   # 日東工業 引込計器盤キャビネット
+    "OMS-251B": "500×1000×200",   # 日東工業 引込計器盤キャビネット
+}
+
+def _load_cache() -> dict[str, str]:
+    cache = dict(_BUILTIN_CACHE)
+    if _CACHE_PATH.exists():
+        try:
+            cache.update(json.loads(_CACHE_PATH.read_text(encoding="utf-8")))
+        except Exception:
+            pass
+    return cache
+
+def _save_cache(cache: dict[str, str]) -> None:
+    try:
+        # 組み込み値は保存しない（差分のみ保存）
+        diff = {k: v for k, v in cache.items() if k not in _BUILTIN_CACHE or _BUILTIN_CACHE[k] != v}
+        _CACHE_PATH.write_text(json.dumps(diff, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+def _lookup_dimensions_web(model: str) -> str | None:
+    """DuckDuckGo 経由で型式の寸法を検索して返す（例: '400×1200×200'）"""
+    try:
+        import requests, re as _re
+        r = requests.get(
+            "https://api.duckduckgo.com/",
+            params={"q": f"{model} 分電盤 寸法 mm", "format": "json", "no_html": "1"},
+            timeout=6,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        text = r.text
+        # W×H×D や 縦×横×深 のパターンを探す
+        m = _re.search(r'[Ww]?\s*(\d{3,4})\s*[×xX]\s*[Hh]?\s*(\d{3,4})\s*[×xX]\s*[Dd]?\s*(\d{2,3})', text)
+        if m:
+            return f"{m.group(1)}×{m.group(2)}×{m.group(3)}"
+    except Exception:
+        pass
+    return None
+
+def get_panel_dimensions(model: str, cache: dict[str, str]) -> str | None:
+    """キャッシュを参照し、なければ Web 検索して寸法文字列を返す"""
+    if model in cache:
+        return cache[model]
+    dims = _lookup_dimensions_web(model)
+    if dims:
+        cache[model] = dims
+        _save_cache(cache)
+    return dims
 
 # ─────────────────────────────────────────
 #  ページ設定
 # ─────────────────────────────────────────
 
-VERSION = "v2.3"
+VERSION = "v2.4"
 
 st.set_page_config(
     page_title="JwCAD 配線・配管 集計ツール",
@@ -108,10 +171,11 @@ if not lines:
 else:
     with result_area.container():
         # 解析
-        conduits, cables, free_cables, bollards = parse_lines(lines)
+        conduits, cables, free_cables, bollards, panels = parse_lines(lines)
         cable_totals, conduit_totals = aggregate(conduits, cables)
         free_cable_totals = aggregate_free_cables(free_cables)
         bollard_totals = aggregate_bollards(bollards)
+        dim_cache = _load_cache()
 
         st.success(f"✅ **{source_name}** を解析しました")
 
@@ -147,6 +211,7 @@ else:
             st.subheader("🔧 配管種")
             if conduit_totals:
                 rows = []
+                empty_conduits = []
                 for inst, ctype, cabs, length in conduit_totals:
                     rows.append({
                         "設置": inst,
@@ -154,20 +219,40 @@ else:
                         "全長": f"{length} m",
                         "内線": " / ".join(cabs) if cabs else "―",
                     })
+                    if not cabs:
+                        empty_conduits.append(f"{inst} {ctype} {length}m")
                 df_conduit = pd.DataFrame(rows)
                 st.dataframe(df_conduit, hide_index=True, use_container_width=True)
+                if empty_conduits:
+                    st.warning(
+                        "⚠️ 内線が検出されていない配管があります（要確認）:\n"
+                        + "\n".join(f"- {c}" for c in empty_conduits)
+                    )
             else:
                 st.warning("配管情報が見つかりませんでした")
 
         # ── 付帯設備 ──
         with col3:
             st.subheader("🚧 付帯設備")
-            if bollard_totals:
-                rows = [{"種別": label, "数量": f"{qty} 台"} for label, qty in bollard_totals.items()]
-                df_bollard = pd.DataFrame(rows)
-                st.dataframe(df_bollard, hide_index=True, use_container_width=True)
+            accessory_rows = []
+
+            # 盤類
+            for p in panels:
+                label = p.name
+                dims = get_panel_dimensions(p.model, dim_cache) if p.model else None
+                detail = f"{p.model}"
+                if dims:
+                    detail += f" ({dims})"
+                accessory_rows.append({"種別": label, "詳細": detail if p.model else "―", "数量": "1 台"})
+
+            # バリカー
+            for label, qty in bollard_totals.items():
+                accessory_rows.append({"種別": label, "詳細": "―", "数量": f"{qty} 台"})
+
+            if accessory_rows:
+                st.dataframe(pd.DataFrame(accessory_rows), hide_index=True, use_container_width=True)
             else:
-                st.info("バリカーは検出されませんでした")
+                st.info("付帯設備は検出されませんでした")
 
         # ── 配管なしケーブル ──
         if free_cable_totals:
@@ -184,7 +269,7 @@ else:
         #  Excel ダウンロード
         # ─────────────────────────────────────────
 
-        def build_excel(cable_totals, conduit_totals, free_cable_totals, bollard_totals) -> bytes:
+        def build_excel(cable_totals, conduit_totals, free_cable_totals, bollard_totals, panels, dim_cache) -> bytes:
             import openpyxl
             from openpyxl.styles import Alignment, Font, Border, Side, PatternFill
 
@@ -270,15 +355,26 @@ else:
             ws.merge_cells(f"A{row}:D{row}")
             cell(row, 1, "付帯設備", bold, header_fill, center)
             row += 1
-            if bollard_totals:
-                for label, qty in bollard_totals.items():
-                    cell(row, 1, label, align=center)
-                    ws.merge_cells(f"B{row}:D{row}")
-                    cell(row, 2, f"{qty}台", align=center)
-                    ws.cell(row=row, column=3).border = border
-                    ws.cell(row=row, column=4).border = border
-                    row += 1
-            else:
+            has_accessory = bool(panels or bollard_totals)
+            for p in panels:
+                dims = get_panel_dimensions(p.model, dim_cache) if p.model else None
+                detail = p.model or ""
+                if dims:
+                    detail += f" ({dims})"
+                cell(row, 1, p.name, align=center)
+                ws.merge_cells(f"B{row}:C{row}")
+                cell(row, 2, detail, align=left_align)
+                ws.cell(row=row, column=3).border = border
+                cell(row, 4, "1台", align=center)
+                row += 1
+            for label, qty in bollard_totals.items():
+                cell(row, 1, label, align=center)
+                ws.merge_cells(f"B{row}:C{row}")
+                cell(row, 2, "", align=center)
+                ws.cell(row=row, column=3).border = border
+                cell(row, 4, f"{qty}台", align=center)
+                row += 1
+            if not has_accessory:
                 ws.merge_cells(f"A{row}:D{row}")
                 cell(row, 1, "（検出されませんでした）", align=left_align)
                 row += 1
@@ -292,7 +388,7 @@ else:
             wb.save(buf)
             return buf.getvalue()
 
-        excel_bytes = build_excel(cable_totals, conduit_totals, free_cable_totals, bollard_totals)
+        excel_bytes = build_excel(cable_totals, conduit_totals, free_cable_totals, bollard_totals, panels, dim_cache)
         stem = Path(source_name).stem if source_name != "直接入力" else "集計結果"
 
         st.download_button(
