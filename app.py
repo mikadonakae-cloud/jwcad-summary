@@ -27,17 +27,24 @@ from jwcad_summary import (
 
 _CACHE_PATH = Path(__file__).parent / "panel_dimensions_cache.json"
 
-# 既知モデルの初期データ
-# dims: タテ×ヨコ×深さ mm / body: 本体材質 / plate: 中板材質
+# 既知モデルの初期データ（dims: タテ×ヨコ×深さ mm）
+# kind: 計器盤 / 制御盤 / プラボックス　roof: 屋根有無
 _BUILTIN_CACHE: dict[str, dict] = {
-    # 日東工業 OMS-B 引込計器盤キャビネット（鉄製本体・木製中板）
-    "OMS-121B": {"dims": "1200×400×200", "body": "鋼板（鉄製）", "plate": "木製"},
-    "OMS-21B":  {"dims": "800×500×200",  "body": "鋼板（鉄製）", "plate": "木製"},
-    "OMS-11B":  {"dims": "800×400×200",  "body": "鋼板（鉄製）", "plate": "木製"},
-    "OMS-12B":  {"dims": "1000×400×200", "body": "鋼板（鉄製）", "plate": "木製"},
-    "OMS-251B": {"dims": "1000×500×200", "body": "鋼板（鉄製）", "plate": "木製"},
-    # 日東工業 OPK-A キー付耐候プラボックス（屋根付）
-    "OPK18-35A": {"dims": "500×300×180", "body": "AAS樹脂",     "plate": "木製"},
+    # ── 日東工業 OMS-B / OM-B / MS 引込計器盤キャビネット ──
+    "OM-17B":   {"dims": "1000×400×200", "body": "鋼製", "plate": "木製", "kind": "計器盤", "roof": True},
+    "OM-15B":   {"dims": "600×400×200",  "body": "鋼製", "plate": "木製", "kind": "計器盤", "roof": True},
+    "OMS-12B":  {"dims": "1000×350×200", "body": "鋼製", "plate": "木製", "kind": "計器盤", "roof": False},
+    "MS-121B":  {"dims": "1200×400×200", "body": "鋼製", "plate": "木製", "kind": "計器盤", "roof": False},
+    "OMS-121B": {"dims": "1200×400×200", "body": "鋼製", "plate": "木製", "kind": "計器盤", "roof": True},
+    "OMS-21B":  {"dims": "800×500×200",  "body": "鋼製", "plate": "木製", "kind": "計器盤", "roof": False},
+    "OMS-11B":  {"dims": "800×400×200",  "body": "鋼製", "plate": "木製", "kind": "計器盤", "roof": False},
+    "OMS-251B": {"dims": "1000×500×200", "body": "鋼製", "plate": "木製", "kind": "計器盤", "roof": False},
+    # ── 日東工業 OR / ORB 屋外用制御盤キャビネット ──
+    "ORB20-48":  {"dims": "800×400×200",  "body": "鋼製", "plate": "木製", "kind": "制御盤", "roof": True},
+    "ORB20-410": {"dims": "1000×400×200", "body": "鋼製", "plate": "木製", "kind": "制御盤", "roof": True},
+    # ── 日東工業 OPK-A / OPK キー付耐候プラボックス（屋根付）──
+    "OPK18-35A": {"dims": "500×300×180",  "body": "AAS樹脂", "plate": "木製", "kind": "プラボックス", "roof": True},
+    "OPK20-46A": {"dims": "600×400×200",  "body": "AAS樹脂", "plate": "木製", "kind": "プラボックス", "roof": True},
 }
 
 def _load_cache() -> dict[str, dict]:
@@ -48,7 +55,7 @@ def _load_cache() -> dict[str, dict]:
             for k, v in stored.items():
                 # 旧フォーマット（文字列）との互換性
                 if isinstance(v, str):
-                    cache[k] = {"dims": v, "body": "", "plate": ""}
+                    cache[k] = {"dims": v, "body": "", "plate": "", "kind": "", "roof": False}
                 else:
                     cache[k] = v
         except Exception:
@@ -102,10 +109,14 @@ def format_panel_detail(model: str | None, info: dict | None) -> str:
     if info:
         if info.get("dims"):
             parts.append(f"{info['dims']}mm")
+        if info.get("kind"):
+            parts.append(info["kind"])
         if info.get("body"):
             parts.append(f"本体:{info['body']}")
         if info.get("plate"):
             parts.append(f"中板:{info['plate']}")
+        if info.get("roof"):
+            parts.append("屋根付")
     return " / ".join(parts)
 
 # ─────────────────────────────────────────
