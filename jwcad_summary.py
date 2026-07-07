@@ -131,26 +131,43 @@ def extract_text_from_jww(filepath: str) -> list[str]:
             ]
 
         # ── 配管→ケーブルの順序修正 ──
-        # ファイル上ではケーブルが配管より先に現れる場合があるため、
-        # ケーブルの直後に同一X近傍の配管が来るとき入れ替える
+        # ファイル上ではケーブルが配管より先に現れる場合があるため順序を修正する。
         def _is_conduit(t: str) -> bool:
             return bool(CONDUIT_PATTERN.search(t))
 
         def _is_cable(t: str) -> bool:
             return bool(CABLE_PATTERN.search(t))
 
-        # offset順に並べてから処理
+        _COUNT_RE = re.compile(r'(\d+)[×x×]\d+\s*\(')
+        _FEP_RE   = re.compile(r'FEP')
+
+        def _cable_count(t: str) -> int:
+            m = _COUNT_RE.search(t)
+            return int(m.group(1)) if m else 99
+
+        def _fep_adjacent_cable_types(recs_list: list, fep_idx: int) -> set:
+            """FEP配管の直後に隣接するケーブル種別セット（次の配管または設置場所まで）"""
+            types: set = set()
+            for j in range(fep_idx + 1, min(fep_idx + 8, len(recs_list))):
+                jx, jy, joff, jt = recs_list[j]
+                if _is_conduit(jt) or LOCATION_PATTERN.search(jt):
+                    break
+                if _is_cable(jt):
+                    m = CABLE_PATTERN.search(jt)
+                    if m:
+                        types.add(normalize_cable(m.group(1)))
+            return types
+
+        # ── Phase 1: 近傍配管スワップ（X距離 < 30mm）──
         records.sort(key=lambda r: r[2])
         recs = list(records)
         i = 0
         while i < len(recs) - 1:
             rx, ry, roff, rt = recs[i]
             if _is_cable(rt) and not _is_conduit(rt):
-                # 直後 1~5 要素に近傍配管がないか確認
                 for k in range(i + 1, min(i + 6, len(recs))):
                     kx, ky, koff, kt = recs[k]
                     if _is_conduit(kt) and abs(kx - rx) < 30:
-                        # このケーブルを配管の直後に移動
                         cable_rec = recs.pop(i)
                         recs.insert(k, cable_rec)
                         i = k + 1
@@ -159,6 +176,51 @@ def extract_text_from_jww(filepath: str) -> list[str]:
                     i += 1
             else:
                 i += 1
+
+        # ── Phase 2: 1×1ケーブルをFEP配管へ補完割り当て ──
+        # FEP配管の直後に隣接していない count=1 ケーブルがあり、
+        # そのFEP配管がその種別のケーブルをまだ持っていない場合に移動する。
+        # （JWW図面でケーブルラベルがルート列に配置される描画慣習への対応）
+        changed = True
+        while changed:
+            changed = False
+            fep_idxs = [idx for idx, (_, _, _, t) in enumerate(recs)
+                        if _is_conduit(t) and _FEP_RE.search(t)]
+            if not fep_idxs:
+                break
+
+            for i, (rx, ry, roff, rt) in enumerate(recs):
+                if not (_is_cable(rt) and not _is_conduit(rt)):
+                    continue
+                if _cable_count(rt) != 1:
+                    continue
+                ct_m = CABLE_PATTERN.search(rt)
+                if not ct_m:
+                    continue
+                cable_norm = normalize_cable(ct_m.group(1))
+
+                # このケーブルより後ろにあるFEP配管を探す
+                feps_after = [fp for fp in fep_idxs if fp > i]
+                if not feps_after:
+                    continue
+
+                # FEPとのX距離が全て30mm以上のときのみ対象
+                if any(abs(recs[fp][0] - rx) < 30 for fp in feps_after):
+                    continue
+
+                # 受け入れ先FEP: この種別をまだ持っていない最初のFEP
+                target_fep = None
+                for fp in sorted(feps_after):
+                    if cable_norm not in _fep_adjacent_cable_types(recs, fp):
+                        target_fep = fp
+                        break
+
+                if target_fep is not None:
+                    cable_rec = recs.pop(i)
+                    adj = target_fep - (1 if i < target_fep else 0)
+                    recs.insert(adj + 1, cable_rec)
+                    changed = True
+                    break  # recs 変更後はリストを再スキャン
 
         seen: set[tuple] = set()
         lines: list[str] = []
