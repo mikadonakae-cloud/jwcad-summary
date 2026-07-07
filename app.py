@@ -23,7 +23,7 @@ from jwcad_summary import (
 #  ページ設定
 # ─────────────────────────────────────────
 
-VERSION = "v2.2"
+VERSION = "v2.3"
 
 st.set_page_config(
     page_title="JwCAD 配線・配管 集計ツール",
