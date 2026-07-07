@@ -27,63 +27,86 @@ from jwcad_summary import (
 
 _CACHE_PATH = Path(__file__).parent / "panel_dimensions_cache.json"
 
-# 既知モデルの初期データ（タテ×ヨコ×深さ mm）
-_BUILTIN_CACHE: dict[str, str] = {
-    # 日東工業 OMS-B 引込計器盤キャビネット
-    "OMS-121B": "1200×400×200",
-    "OMS-21B":  "800×500×200",
-    "OMS-11B":  "800×400×200",
-    "OMS-12B":  "1000×400×200",
-    "OMS-251B": "1000×500×200",
+# 既知モデルの初期データ
+# dims: タテ×ヨコ×深さ mm / body: 本体材質 / plate: 中板材質
+_BUILTIN_CACHE: dict[str, dict] = {
+    # 日東工業 OMS-B 引込計器盤キャビネット（鉄製本体・木製中板）
+    "OMS-121B": {"dims": "1200×400×200", "body": "鋼板（鉄製）", "plate": "木製"},
+    "OMS-21B":  {"dims": "800×500×200",  "body": "鋼板（鉄製）", "plate": "木製"},
+    "OMS-11B":  {"dims": "800×400×200",  "body": "鋼板（鉄製）", "plate": "木製"},
+    "OMS-12B":  {"dims": "1000×400×200", "body": "鋼板（鉄製）", "plate": "木製"},
+    "OMS-251B": {"dims": "1000×500×200", "body": "鋼板（鉄製）", "plate": "木製"},
     # 日東工業 OPK-A キー付耐候プラボックス（屋根付）
-    "OPK18-35A": "500×300×180",
+    "OPK18-35A": {"dims": "500×300×180", "body": "AAS樹脂",     "plate": "木製"},
 }
 
-def _load_cache() -> dict[str, str]:
-    cache = dict(_BUILTIN_CACHE)
+def _load_cache() -> dict[str, dict]:
+    cache: dict[str, dict] = {k: dict(v) for k, v in _BUILTIN_CACHE.items()}
     if _CACHE_PATH.exists():
         try:
-            cache.update(json.loads(_CACHE_PATH.read_text(encoding="utf-8")))
+            stored = json.loads(_CACHE_PATH.read_text(encoding="utf-8"))
+            for k, v in stored.items():
+                # 旧フォーマット（文字列）との互換性
+                if isinstance(v, str):
+                    cache[k] = {"dims": v, "body": "", "plate": ""}
+                else:
+                    cache[k] = v
         except Exception:
             pass
     return cache
 
-def _save_cache(cache: dict[str, str]) -> None:
+def _save_cache(cache: dict[str, dict]) -> None:
     try:
-        # 組み込み値は保存しない（差分のみ保存）
-        diff = {k: v for k, v in cache.items() if k not in _BUILTIN_CACHE or _BUILTIN_CACHE[k] != v}
+        diff = {k: v for k, v in cache.items()
+                if k not in _BUILTIN_CACHE or _BUILTIN_CACHE[k] != v}
         _CACHE_PATH.write_text(json.dumps(diff, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
 
-def _lookup_dimensions_web(model: str) -> str | None:
-    """DuckDuckGo 経由で型式の寸法を検索して返す（例: '400×1200×200'）"""
+def _lookup_panel_info_web(model: str) -> dict | None:
+    """DuckDuckGo 経由で型式の寸法を検索（タテ×ヨコ×深さ）。材質は要手動登録。"""
     try:
         import requests, re as _re
         r = requests.get(
             "https://api.duckduckgo.com/",
-            params={"q": f"{model} 分電盤 寸法 mm", "format": "json", "no_html": "1"},
+            params={"q": f"{model} 盤 寸法 mm タテ ヨコ", "format": "json", "no_html": "1"},
             timeout=6,
             headers={"User-Agent": "Mozilla/5.0"},
         )
         text = r.text
-        # W×H×D や 縦×横×深 のパターンを探す
-        m = _re.search(r'[Ww]?\s*(\d{3,4})\s*[×xX]\s*[Hh]?\s*(\d{3,4})\s*[×xX]\s*[Dd]?\s*(\d{2,3})', text)
+        # タテ×ヨコ×深さ / H×W×D などのパターンを探す
+        m = _re.search(r'(?:タテ|縦|[Hh])\s*[=:：]?\s*(\d{3,4})\D+(?:ヨコ|横|[Ww])\s*[=:：]?\s*(\d{3,4})\D+(?:深|フカサ|[Dd])\s*[=:：]?\s*(\d{2,3})', text)
+        if not m:
+            m = _re.search(r'(\d{3,4})\s*[×xX]\s*(\d{3,4})\s*[×xX]\s*(\d{2,3})', text)
         if m:
-            return f"{m.group(1)}×{m.group(2)}×{m.group(3)}"
+            return {"dims": f"{m.group(1)}×{m.group(2)}×{m.group(3)}", "body": "", "plate": ""}
     except Exception:
         pass
     return None
 
-def get_panel_dimensions(model: str, cache: dict[str, str]) -> str | None:
-    """キャッシュを参照し、なければ Web 検索して寸法文字列を返す"""
+def get_panel_info(model: str, cache: dict[str, dict]) -> dict | None:
+    """キャッシュを参照し、なければ Web 検索してパネル情報dictを返す"""
     if model in cache:
         return cache[model]
-    dims = _lookup_dimensions_web(model)
-    if dims:
-        cache[model] = dims
+    info = _lookup_panel_info_web(model)
+    if info:
+        cache[model] = info
         _save_cache(cache)
-    return dims
+    return info
+
+def format_panel_detail(model: str | None, info: dict | None) -> str:
+    """付帯設備テーブルの「詳細」列テキストを組み立てる"""
+    if not model:
+        return "―"
+    parts = [model]
+    if info:
+        if info.get("dims"):
+            parts.append(f"{info['dims']}mm")
+        if info.get("body"):
+            parts.append(f"本体:{info['body']}")
+        if info.get("plate"):
+            parts.append(f"中板:{info['plate']}")
+    return " / ".join(parts)
 
 # ─────────────────────────────────────────
 #  ページ設定
@@ -241,12 +264,9 @@ else:
 
             # 盤類
             for p in panels:
-                label = p.name
-                dims = get_panel_dimensions(p.model, dim_cache) if p.model else None
-                detail = f"{p.model}"
-                if dims:
-                    detail += f" ({dims})"
-                accessory_rows.append({"種別": label, "詳細": detail if p.model else "―", "数量": "1 台"})
+                info = get_panel_info(p.model, dim_cache) if p.model else None
+                detail = format_panel_detail(p.model, info)
+                accessory_rows.append({"種別": p.name, "詳細": detail, "数量": "1 台"})
 
             # バリカー
             for label, qty in bollard_totals.items():
@@ -360,10 +380,8 @@ else:
             row += 1
             has_accessory = bool(panels or bollard_totals)
             for p in panels:
-                dims = get_panel_dimensions(p.model, dim_cache) if p.model else None
-                detail = p.model or ""
-                if dims:
-                    detail += f" ({dims})"
+                info = get_panel_info(p.model, dim_cache) if p.model else None
+                detail = format_panel_detail(p.model, info)
                 cell(row, 1, p.name, align=center)
                 ws.merge_cells(f"B{row}:C{row}")
                 cell(row, 2, detail, align=left_align)
