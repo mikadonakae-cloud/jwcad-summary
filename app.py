@@ -75,6 +75,10 @@ with st.sidebar:
 lines = []
 source_name = ""
 
+# ファイル有無の切り替わり時にReact DOM不整合エラーを防ぐため完全再描画する
+if "prev_has_content" not in st.session_state:
+    st.session_state.prev_has_content = False
+
 if uploaded is not None:
     ext = Path(uploaded.name).suffix.lower()
     with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
@@ -94,6 +98,12 @@ if uploaded is not None:
 elif run_manual and manual_text.strip():
     lines = [l.strip() for l in manual_text.splitlines() if l.strip()]
     source_name = "直接入力"
+
+# コンテンツ有無が変わった場合は完全再描画してReact DOM不整合を防ぐ
+has_content = len(lines) > 0
+if has_content != st.session_state.prev_has_content:
+    st.session_state.prev_has_content = has_content
+    st.rerun()
 
 # ─────────────────────────────────────────
 #  結果表示
