@@ -521,7 +521,10 @@ PANEL_RE = re.compile(
     r'(?:新設|引込|増設)\s*(?:分電盤|開閉器盤|引込開閉器盤)'
     r'|(?:引込開閉器盤)'
 )
-PANEL_MODEL_RE = re.compile(r'\(([A-Z0-9][A-Z0-9\-]+)\)')  # (OMS-121B) など
+PANEL_MODEL_RE = re.compile(r'[（(]([A-Z0-9][A-Z0-9\-]+)[）)]')  # (OMS-121B)・（OMS-121B）
+
+# テントシートパターン
+TENT_RE = re.compile(r'テントシート|屋根\s*[（(]\s*TF[-\w]+\s*[）)]')
 
 # バリカーパターン例:
 #   バリカー ×3
@@ -709,6 +712,16 @@ def parse_lines(lines: list[str]) -> tuple[list[ConduitEntry], list[CableEntry],
                 if sig:
                     dual_cable_sigs.add(sig)
             reset_block()
+            continue
+
+        # テントシート検出（「テントシート（TF-800）」「屋根 （TF-800）」など）
+        if TENT_RE.search(line):
+            mm = PANEL_MODEL_RE.search(line)
+            model = mm.group(1) if mm else None
+            key = f"テントシート|{model or ''}"
+            if key not in _seen_panels:
+                _seen_panels.add(key)
+                panels.append(PanelEntry(name="屋根（テントシート）", model=model))
             continue
 
         # 分電盤・開閉器盤マッチ（既設は除外済み）
